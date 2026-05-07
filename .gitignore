@@ -1,0 +1,47 @@
+# Generated artifacts
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+.env.*
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# AI assistant artifacts (Claude, Cursor, Copilot, Aider, Gemini, Windsurf, etc.)
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.claude/
+.cursor/
+.cursorrules
+.cursorignore
+.github/copilot-instructions.md
+.aider*
+.windsurfrules
+.continuerules
+.codeium/
+.tabnine/
+.sourcegraph/
+.cody/
+
+# AI-managed project docs
+TODOS.md
+CHANGELOG.md
+PROJECT_INFO.md

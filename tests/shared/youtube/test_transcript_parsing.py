@@ -85,6 +85,9 @@ def test_parse_caption_body_dispatches_by_ext() -> None:
     json3 = json.dumps({"events": [{"segs": [{"utf8": "hi"}]}]})
     assert _parse_caption_body(json3, "json3") == [{"text": "hi"}]
     assert _parse_caption_body("WEBVTT\n\n00:00 --> 00:01\nhi", "vtt") == [{"text": "hi"}]
+    # ttml / srv* route to the xml-like parser
+    assert _parse_caption_body("<p>hi</p>", "ttml") == [{"text": "hi"}]
+    assert _parse_caption_body("<text>hi</text>", "srv3") == [{"text": "hi"}]
     # unknown ext falls back to the xml-like parser
     assert _parse_caption_body("<p>hi</p>", "weird-ext") == [{"text": "hi"}]
 

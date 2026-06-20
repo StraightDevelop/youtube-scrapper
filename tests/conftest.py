@@ -30,3 +30,50 @@ def make_record() -> Callable[..., dict]:
         return record
 
     return _make
+
+
+@pytest.fixture
+def make_fake_ydl() -> Callable[..., type]:
+    """Return a factory that builds a fake ``yt_dlp.YoutubeDL`` class.
+
+    Lets tests mock the yt_dlp boundary without network. Monkeypatch a module's
+    ``YoutubeDL`` symbol with the returned class:
+        ``monkeypatch.setattr(mod, "YoutubeDL", make_fake_ydl(info={...}))``
+
+    Args (of the factory):
+        info: dict returned by ``extract_info`` (``{}`` when None).
+        exc: if set, ``extract_info`` raises it (to drive error paths).
+        hook_events: list of progress-hook event dicts fired (in order) against
+            the constructed instance's ``opts["progress_hooks"]`` when
+            ``extract_info(..., download=True)`` is called — mirrors yt_dlp's
+            download progress callbacks.
+        prepared: value returned by ``prepare_filename`` (download fallback path).
+    Returns:
+        A class accepting ``(opts)`` whose instances are context managers.
+    """
+    def _factory(*, info=None, exc=None, hook_events=None, prepared: str = "") -> type:
+        class _FakeYoutubeDL:
+            def __init__(self, opts=None):
+                self.opts = opts or {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+            def extract_info(self, url, download=False):
+                if exc is not None:
+                    raise exc
+                if download:
+                    for event in hook_events or []:
+                        for hook in self.opts.get("progress_hooks", []):
+                            hook(event)
+                return {} if info is None else info
+
+            def prepare_filename(self, _info):
+                return prepared
+
+        return _FakeYoutubeDL
+
+    return _factory

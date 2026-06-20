@@ -46,6 +46,7 @@ from shared.youtube.channel_extractor import (  # noqa: E402
     list_channel_videos,
 )
 from shared.youtube.concurrent_fetch import stream_transcripts  # noqa: E402
+from shared.youtube.transcript_fetcher import friendly_transcript_status  # noqa: E402
 from shared.youtube.url_validator import (  # noqa: E402
     extract_channel_handle,
     extract_playlist_id,
@@ -196,12 +197,15 @@ def _table_view(records: list[Record]) -> list[Record]:
     rows: list[Record] = []
     for i, r in enumerate(visible, start=1):
         title = str(r.get("title", ""))
+        status = str(r.get("status", ""))
         rows.append({
             "#": offset + i,
-            "status": r.get("status"),
+            "status": status,
             "lang": r.get("language"),
             "chars": len(str(r.get("transcript", ""))),
             "title": title[:80] + ("…" if len(title) > 80 else ""),
+            # Plain-English reason for non-OK rows (CX, Phase 2c); blank when OK.
+            "why": friendly_transcript_status(status),
         })
     return rows
 

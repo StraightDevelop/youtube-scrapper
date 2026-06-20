@@ -33,6 +33,7 @@ from shared.io.summary_writer import write_summary  # noqa: E402
 from shared.utils.logger import configure_logging  # noqa: E402
 from shared.youtube.channel_extractor import VideoMeta, list_channel_videos  # noqa: E402
 from shared.youtube.concurrent_fetch import stream_transcripts  # noqa: E402
+from shared.youtube.transcript_fetcher import friendly_transcript_status  # noqa: E402
 from shared.youtube.url_validator import (  # noqa: E402
     extract_channel_handle,
     validate_channel_url,
@@ -254,6 +255,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             failures[status] = failures.get(status, 0) + 1
         print(f"[{completed}/{fetch_total}] {status:<13} {video['title']}")
+        if status != "OK":
+            print(f"    ↳ {friendly_transcript_status(status)}")
 
     elapsed = time.time() - started
     failed_total = sum(failures.values())

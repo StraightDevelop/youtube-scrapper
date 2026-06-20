@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from shared.youtube.transcript_fetcher import (
     _classify_extract_error,
     _classify_generic_error,
@@ -21,6 +23,7 @@ from shared.youtube.transcript_fetcher import (
     _pick_format,
     _pick_track,
     _resolve_lang,
+    friendly_transcript_status,
 )
 
 
@@ -194,3 +197,20 @@ def test_classify_generic_error_network_hint() -> None:
 
 def test_classify_generic_error_other() -> None:
     assert _classify_generic_error("vid", Exception("weird"))[0] == "OTHER"
+
+
+# --------------------------------------------------------------------------- #
+# friendly_transcript_status (CX — Phase 2c)
+# --------------------------------------------------------------------------- #
+def test_friendly_transcript_status_ok_is_empty() -> None:
+    assert friendly_transcript_status("OK") == ""
+
+
+@pytest.mark.parametrize("status", ["NO_CAPTIONS", "DISABLED", "NETWORK_ERROR", "OTHER"])
+def test_friendly_transcript_status_failures_have_plain_message(status: str) -> None:
+    msg = friendly_transcript_status(status)
+    assert msg and not msg.isupper()        # human sentence, not the raw code
+
+
+def test_friendly_transcript_status_unknown_falls_back() -> None:
+    assert friendly_transcript_status("WAT") == friendly_transcript_status("OTHER")

@@ -132,6 +132,36 @@ def fetch_transcript(
     return "OK", label, text
 
 
+_FRIENDLY_STATUS: dict[str, str] = {
+    "OK": "",
+    "NO_CAPTIONS": "No captions or subtitles are available for this video.",
+    "DISABLED": "The uploader turned off captions for this video.",
+    "NETWORK_ERROR": (
+        "Couldn't reach YouTube (rate-limited or a network hiccup). "
+        "It'll be retried automatically on the next run."
+    ),
+    "OTHER": "Something went wrong while fetching this transcript.",
+}
+
+
+def friendly_transcript_status(status: str) -> str:
+    """Translate a transcript-fetch :data:`Status` into a non-technical sentence (CX).
+
+    Mirrors :func:`shared.youtube.video_downloader.friendly_download_error` for the
+    transcript path, where failures surface as a status code rather than an
+    exception. The web/CLI use this to explain *why* a video has no transcript in
+    plain English instead of showing ``NO_CAPTIONS`` / ``NETWORK_ERROR`` raw.
+
+    Args:
+        status: A value from :data:`Status` (or any string; unknown codes get the
+            generic ``OTHER`` message so callers never show a blank reason).
+    Returns:
+        Empty string for ``"OK"`` (no failure to explain); otherwise a friendly,
+        user-facing sentence.
+    """
+    return _FRIENDLY_STATUS.get(status, _FRIENDLY_STATUS["OTHER"])
+
+
 def _extract_info(video_id: str) -> dict[str, Any]:
     """Run yt-dlp's player extractor and return the info_dict."""
     opts = {

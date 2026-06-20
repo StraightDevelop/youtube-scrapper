@@ -7,7 +7,12 @@ testpaths = ["tests"]
 # Put the repo root on sys.path so tests import `from shared...` without hacks.
 pythonpath = ["."]
 # A bare `pytest` (incl. the grader's `pytest -q`) auto-applies the coverage gate.
-addopts = "-q --cov --cov-report=term-missing --cov-fail-under=85"
+# `-m 'not slow'` keeps the core suite Streamlit-free (the AppTest smoke test pulls
+# in streamlit/pandas/altair); run that test with `pytest -m slow`.
+addopts = "-q --cov --cov-report=term-missing --cov-fail-under=85 -m 'not slow'"
+markers = [
+    "slow: opt-in tests that import heavy UI deps (Streamlit AppTest); run with -m slow",
+]
 
 [tool.coverage.run]
 branch = true
@@ -26,6 +31,7 @@ include = [
     "shared/youtube/channel_extractor.py",
     "shared/youtube/video_downloader.py",
     "shared/youtube/concurrent_fetch.py",
+    "shared/youtube/languages.py",
 ]
 
 [tool.coverage.report]

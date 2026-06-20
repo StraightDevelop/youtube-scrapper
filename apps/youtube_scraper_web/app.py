@@ -47,6 +47,11 @@ from shared.youtube.channel_extractor import (  # noqa: E402
     list_channel_videos,
 )
 from shared.youtube.concurrent_fetch import stream_transcripts  # noqa: E402
+from shared.youtube.languages import (  # noqa: E402
+    codes_from_labels,
+    language_options,
+    option_label,
+)
 from shared.youtube.transcript_fetcher import (  # noqa: E402
     FAILURE_STATUSES,
     RETRY_STATUSES,
@@ -74,6 +79,7 @@ logger = logging.getLogger("scraper.web")
 DEFAULT_LANGUAGES = "th,en"
 DEFAULT_DELAY = 1.0
 DEFAULT_MAX_WORKERS = 4   # parallel transcript fetches (Phase 2b); see concurrent_fetch
+_TABLE_MAX_ROWS = 50      # live progress table shows the latest N rows (Phase 3)
 # FAILURE_STATUSES / RETRY_STATUSES imported from shared.youtube.transcript_fetcher
 # (single source of truth — rule 8). RETRY_STATUSES = transient failures only.
 
@@ -159,8 +165,8 @@ def _resolve_videos(mode: str, target: str) -> list[VideoMeta]:
 
 
 def _table_view(records: list[Record]) -> list[Record]:
-    """Compact view for live progress (last 50 rows for readability)."""
-    visible = records[-50:]
+    """Compact view for live progress (latest ``_TABLE_MAX_ROWS`` rows)."""
+    visible = records[-_TABLE_MAX_ROWS:]
     offset = len(records) - len(visible)
     rows: list[Record] = []
     for i, r in enumerate(visible, start=1):
@@ -193,6 +199,10 @@ def render_page() -> None:
 
     common = _render_sidebar()
 
+    st.caption(
+        "📝 **Get transcript** works on a channel, playlist, or single video. "
+        "📥 **Download video** saves one video at a time."
+    )
     tab_transcript, tab_download = st.tabs(["📝  Get transcript", "📥  Download video"])
     with tab_transcript:
         _render_transcript_tab(common)
@@ -221,16 +231,26 @@ def _render_sidebar() -> dict[str, Any]:
             ),
         )
         with st.expander("Advanced (optional)", expanded=False):
-            languages_raw = st.text_input(
-                "Caption language preference",
-                value=DEFAULT_LANGUAGES,
+            # Pick languages by name (priority order); power users can add raw codes.
+            picked_languages = st.multiselect(
+                "Caption languages (most-wanted first)",
+                options=language_options(),
+                default=[option_label(c) for c in DEFAULT_LANGUAGES.split(",") if c.strip()],
                 help=(
-                    "Comma-separated list of language codes — the first available "
-                    "match wins. We always fall back to any auto-generated "
-                    "captions when none of these are available. Examples: "
-                    "`th,en` for Thai-then-English, `en` for English only."
+                    "Choose the caption languages you want, in priority order. "
+                    "We fall back to auto-generated captions when none are available."
                 ),
             )
+            extra_codes = st.text_input(
+                "Other language codes (optional)",
+                value="",
+                placeholder="e.g. nl, sv",
+                help="Comma-separated ISO codes not shown in the list above.",
+            )
+            languages_raw = ",".join(
+                codes_from_labels(picked_languages)
+                + [c.strip() for c in extra_codes.split(",") if c.strip()]
+            ) or DEFAULT_LANGUAGES
             delay_seconds = st.number_input(
                 "Wait between videos (seconds)",
                 min_value=0.0, max_value=10.0,
@@ -702,6 +722,7 @@ def _scrape_one_source(
             0.0, text=f"Starting transcription for {fetch_count} video(s)…",
         )
         table_holder = st.empty()
+        caption_holder = st.empty()   # "showing last N of M" note for big runs
         started = time.time()
 
         # Fetch in parallel (bounded); results arrive in completion order, which is
@@ -723,6 +744,10 @@ def _scrape_one_source(
             table_holder.dataframe(
                 _table_view(records_this_run), hide_index=True, use_container_width=True,
             )
+            if len(records_this_run) > _TABLE_MAX_ROWS:
+                caption_holder.caption(
+                    f"Showing the latest {_TABLE_MAX_ROWS} of {len(records_this_run)} processed."
+                )
 
         elapsed = time.time() - started
         progress.progress(1.0, text=f"Done in {elapsed:.1f}s")

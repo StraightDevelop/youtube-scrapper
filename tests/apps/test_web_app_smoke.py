@@ -23,3 +23,8 @@ def test_web_app_renders_empty_state_without_error() -> None:
     assert not app.exception                      # page rendered cleanly
     # The language picker (Phase 3) should be present in the sidebar.
     assert any("Caption languages" in (ms.label or "") for ms in app.multiselect)
+    # Regression guard: each tab must show a submit button on the empty state so a
+    # pasted URL is actionable without pressing Enter (the "no button" bug).
+    labels = [b.label for b in app.button]
+    assert any("Look up this link" in lbl for lbl in labels), labels
+    assert any("Find this video" in lbl for lbl in labels), labels

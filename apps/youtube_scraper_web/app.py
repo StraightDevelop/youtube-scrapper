@@ -298,12 +298,19 @@ def _render_sidebar() -> dict[str, Any]:
 
 def _render_transcript_tab(common: dict[str, Any]) -> None:
     """The original transcript flow, now scoped to a top-level tab."""
-    url_input = st.text_input(
-        label="YouTube URL (transcript tab)",
-        label_visibility="collapsed",
-        placeholder="Paste a YouTube link here — video, playlist, or channel",
-        key="url_input_transcript",
-    )
+    # A form gives an explicit submit button: `st.text_input` alone only registers
+    # its value on Enter/blur, so non-technical users who paste then look for a
+    # button never trigger it. The submit button commits the URL on click.
+    with st.form("form_transcript", clear_on_submit=False):
+        url_input = st.text_input(
+            label="YouTube URL (transcript tab)",
+            label_visibility="collapsed",
+            placeholder="Paste a YouTube link here — video, playlist, or channel",
+            key="url_input_transcript",
+        )
+        st.form_submit_button(
+            "Look up this link →", type="primary", use_container_width=True,
+        )
 
     if not url_input.strip():
         _render_empty_state(
@@ -339,12 +346,18 @@ def _render_download_tab() -> None:
     or 11-character ID, asks one question (quality), saves the file under
     ``output/videos/`` and offers an in-browser download.
     """
-    url_input = st.text_input(
-        label="YouTube video URL (download tab)",
-        label_visibility="collapsed",
-        placeholder="Paste a single YouTube video link — e.g. https://youtu.be/dQw4w9WgXcQ",
-        key="url_input_download",
-    )
+    # Form submit button so pasting + clicking works without pressing Enter
+    # (see _render_transcript_tab for the rationale).
+    with st.form("form_download", clear_on_submit=False):
+        url_input = st.text_input(
+            label="YouTube video URL (download tab)",
+            label_visibility="collapsed",
+            placeholder="Paste a single YouTube video link — e.g. https://youtu.be/dQw4w9WgXcQ",
+            key="url_input_download",
+        )
+        st.form_submit_button(
+            "Find this video →", type="primary", use_container_width=True,
+        )
 
     if not url_input.strip():
         _render_empty_state(

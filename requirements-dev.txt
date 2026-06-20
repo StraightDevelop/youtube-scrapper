@@ -1,0 +1,11 @@
+# Development / test dependencies. Kept separate from runtime requirements.txt so
+# the scraper's install surface (yt-dlp + streamlit) stays unchanged.
+#
+# Install:  pip install -r requirements-dev.txt   (inside the project venv)
+# Run:      pytest                                  (config in pyproject.toml)
+
+# Test runner. >=7.0 required for [tool.pytest.ini_options] pythonpath support.
+pytest>=7.4,<9.0
+
+# Coverage plugin — enforces the >=85% gate via pyproject addopts (--cov-fail-under).
+pytest-cov>=4.1,<6.0

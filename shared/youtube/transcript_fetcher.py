@@ -17,7 +17,7 @@ import re
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from yt_dlp import YoutubeDL  # type: ignore[import-not-found]
 from yt_dlp.utils import DownloadError, ExtractorError  # type: ignore[import-not-found]
@@ -26,7 +26,23 @@ from shared.utils.text_cleaner import clean_transcript_snippets
 
 logger = logging.getLogger(__name__)
 
-Status = Literal["OK", "NO_CAPTIONS", "DISABLED", "NETWORK_ERROR", "OTHER"]
+Status = Literal[
+    "OK", "NO_CAPTIONS", "EMPTY_CAPTIONS", "DISABLED", "NETWORK_ERROR", "UNAVAILABLE", "OTHER"
+]
+
+# Canonical status sets — the single source of truth (rule 8). Apps import these
+# instead of redefining their own copies.
+FAILURE_STATUSES: tuple[str, ...] = (
+    "NO_CAPTIONS", "EMPTY_CAPTIONS", "DISABLED", "NETWORK_ERROR", "UNAVAILABLE", "OTHER",
+)
+# Statuses worth re-trying on a later resume run (transient). The permanent ones
+# (no/empty/disabled captions, unavailable video) won't change on retry.
+RETRY_STATUSES: frozenset[str] = frozenset({"NETWORK_ERROR", "OTHER"})
+
+# yt-dlp info_dict ``availability`` values that mean "we can't read this video".
+_RESTRICTED_AVAILABILITY = frozenset(
+    {"private", "premium_only", "subscriber_only", "needs_auth"}
+)
 
 _NETWORK_HINTS = (
     "network",
@@ -96,6 +112,11 @@ def fetch_transcript(
     manual = info.get("subtitles") or {}
     auto = info.get("automatic_captions") or {}
     if not manual and not auto:
+        # No captions at all — distinguish "restricted video" from "just no captions"
+        # so the UI can explain why (accuracy/CX).
+        if _is_unavailable(info):
+            logger.warning("fetch_transcript: unavailable id=%s", video_id)
+            return "UNAVAILABLE", "none", ""
         logger.warning("fetch_transcript: no_captions id=%s", video_id)
         return "NO_CAPTIONS", "none", ""
 
@@ -121,8 +142,9 @@ def fetch_transcript(
 
     snippets = _parse_caption_body(body, ext)
     if not snippets:
+        # A track existed but parsed to nothing — distinct from "no track at all".
         logger.warning("fetch_transcript: empty_body id=%s ext=%s", video_id, ext)
-        return "NO_CAPTIONS", "none", ""
+        return "EMPTY_CAPTIONS", "none", ""
 
     text = clean_transcript_snippets(snippets)
     logger.info(
@@ -130,6 +152,86 @@ def fetch_transcript(
         video_id, label, ext, len(text), time.time() - started,
     )
     return "OK", label, text
+
+
+_FRIENDLY_STATUS: dict[str, str] = {
+    "OK": "",
+    "NO_CAPTIONS": "No captions or subtitles are available for this video.",
+    "EMPTY_CAPTIONS": "This video has a caption track, but it contains no text.",
+    "DISABLED": "The uploader turned off captions for this video.",
+    "NETWORK_ERROR": (
+        "Couldn't reach YouTube (rate-limited or a network hiccup). "
+        "It'll be retried automatically on the next run."
+    ),
+    "UNAVAILABLE": "This video is private, removed, members-only, or age-restricted.",
+    "OTHER": "Something went wrong while fetching this transcript.",
+}
+
+
+_SHORT_STATUS_LABEL: dict[str, str] = {
+    "NO_CAPTIONS": "no captions",
+    "EMPTY_CAPTIONS": "empty captions",
+    "DISABLED": "captions disabled",
+    "NETWORK_ERROR": "rate-limited / network",
+    "UNAVAILABLE": "private / removed / age-restricted",
+    "OTHER": "other error",
+}
+
+
+def summarize_failures(failures_by_status: Mapping[str, int]) -> str:
+    """Build a short human breakdown of failure counts (CX).
+
+    Args:
+        failures_by_status: ``{status: count}`` — typically the run summary's
+            ``failures_by_status`` field. Zero-count and ``OK`` entries are ignored.
+    Returns:
+        e.g. ``"2 no captions · 1 rate-limited / network"``; ``""`` when there are
+        no failures, so callers can render conditionally.
+    """
+    parts = [
+        f"{count} {_SHORT_STATUS_LABEL.get(status, status.lower())}"
+        for status, count in failures_by_status.items()
+        if status != "OK" and count
+    ]
+    return " · ".join(parts)
+
+
+def _is_unavailable(info: dict[str, Any]) -> bool:
+    """Return True when a yt-dlp info_dict signals a restricted/age-gated video.
+
+    Used to upgrade a bare ``NO_CAPTIONS`` to ``UNAVAILABLE`` when YouTube returned
+    metadata but the video can't really be read (private/members-only/age-gated).
+
+    Args:
+        info: The info_dict from :func:`_extract_info`.
+    Returns:
+        True if ``availability`` is a restricted value or ``age_limit`` >= 18.
+    """
+    availability = info.get("availability")
+    if isinstance(availability, str) and availability in _RESTRICTED_AVAILABILITY:
+        return True
+    try:
+        return int(info.get("age_limit") or 0) >= 18
+    except (TypeError, ValueError):
+        return False
+
+
+def friendly_transcript_status(status: str) -> str:
+    """Translate a transcript-fetch :data:`Status` into a non-technical sentence (CX).
+
+    Mirrors :func:`shared.youtube.video_downloader.friendly_download_error` for the
+    transcript path, where failures surface as a status code rather than an
+    exception. The web/CLI use this to explain *why* a video has no transcript in
+    plain English instead of showing ``NO_CAPTIONS`` / ``NETWORK_ERROR`` raw.
+
+    Args:
+        status: A value from :data:`Status` (or any string; unknown codes get the
+            generic ``OTHER`` message so callers never show a blank reason).
+    Returns:
+        Empty string for ``"OK"`` (no failure to explain); otherwise a friendly,
+        user-facing sentence.
+    """
+    return _FRIENDLY_STATUS.get(status, _FRIENDLY_STATUS["OTHER"])
 
 
 def _extract_info(video_id: str) -> dict[str, Any]:
@@ -298,7 +400,7 @@ def _classify_extract_error(
         return "NETWORK_ERROR", "none", ""
     if any(hint in msg for hint in _UNAVAILABLE_HINTS):
         logger.warning("fetch_transcript: unavailable id=%s err=%s", video_id, exc)
-        return "OTHER", "none", ""
+        return "UNAVAILABLE", "none", ""
     logger.warning(
         "fetch_transcript: extract_failed id=%s type=%s err=%s",
         video_id, type(exc).__name__, exc,

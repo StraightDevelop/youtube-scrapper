@@ -35,6 +35,7 @@ if str(_REPO_ROOT) not in sys.path:
 import streamlit as st  # noqa: E402
 
 from shared.io.jsonl_writer import append_jsonl  # noqa: E402
+from shared.io.record_merge import dedupe_by_id, merge_records  # noqa: E402
 from shared.io.resume_reader import collect_channel_history  # noqa: E402
 from shared.io.summary_writer import write_summary  # noqa: E402
 from shared.utils.logger import configure_logging  # noqa: E402
@@ -45,7 +46,18 @@ from shared.youtube.channel_extractor import (  # noqa: E402
     list_channel_playlists,
     list_channel_videos,
 )
-from shared.youtube.transcript_fetcher import fetch_transcript  # noqa: E402
+from shared.youtube.concurrent_fetch import stream_transcripts  # noqa: E402
+from shared.youtube.languages import (  # noqa: E402
+    codes_from_labels,
+    language_options,
+    option_label,
+)
+from shared.youtube.transcript_fetcher import (  # noqa: E402
+    FAILURE_STATUSES,
+    RETRY_STATUSES,
+    friendly_transcript_status,
+    summarize_failures,
+)
 from shared.youtube.url_validator import (  # noqa: E402
     extract_channel_handle,
     extract_playlist_id,
@@ -66,13 +78,10 @@ logger = logging.getLogger("scraper.web")
 
 DEFAULT_LANGUAGES = "th,en"
 DEFAULT_DELAY = 1.0
-FAILURE_STATUSES = ("NO_CAPTIONS", "DISABLED", "NETWORK_ERROR", "OTHER")
-# Statuses worth retrying on a follow-up run. NO_CAPTIONS / DISABLED won't
-# change without the uploader's intervention. NETWORK_ERROR is transient,
-# and OTHER is "unknown failure" by definition — both deserve another shot
-# (especially since v0.5.1 backfills records previously stuck on OTHER from
-# the youtube-transcript-api 429 incident).
-RETRY_STATUSES = {"NETWORK_ERROR", "OTHER"}
+DEFAULT_MAX_WORKERS = 4   # parallel transcript fetches (Phase 2b); see concurrent_fetch
+_TABLE_MAX_ROWS = 50      # live progress table shows the latest N rows (Phase 3)
+# FAILURE_STATUSES / RETRY_STATUSES imported from shared.youtube.transcript_fetcher
+# (single source of truth — rule 8). RETRY_STATUSES = transient failures only.
 
 Record = dict[str, Any]
 
@@ -142,39 +151,6 @@ def records_to_jsonl_bytes(records: list[Record]) -> bytes:
     return ("\n".join(parts) + "\n").encode("utf-8")
 
 
-def _merge_records(prior: list[Record], fresh: list[Record]) -> list[Record]:
-    """Merge prior and freshly-fetched records, with ``fresh`` overriding by ID.
-
-    Order: prior records first (in their original order), then IDs only seen
-    in ``fresh``. Prior records whose ID was re-fetched are replaced in place.
-    """
-    fresh_by_id = {r.get("id"): r for r in fresh if isinstance(r.get("id"), str)}
-    merged: list[Record] = []
-    seen: set[str] = set()
-    for record in prior:
-        rid = record.get("id")
-        if not isinstance(rid, str):
-            continue
-        merged.append(fresh_by_id[rid] if rid in fresh_by_id else record)
-        seen.add(rid)
-    for record in fresh:
-        rid = record.get("id")
-        if isinstance(rid, str) and rid not in seen:
-            merged.append(record)
-            seen.add(rid)
-    return merged
-
-
-def _dedupe_by_id(records: list[Record]) -> list[Record]:
-    """Return ``records`` deduplicated by ID — last occurrence wins."""
-    by_id: dict[str, Record] = {}
-    for record in records:
-        rid = record.get("id")
-        if isinstance(rid, str):
-            by_id[rid] = record
-    return list(by_id.values())
-
-
 def _resolve_videos(mode: str, target: str) -> list[VideoMeta]:
     """List videos for the given mode + target.
 
@@ -189,18 +165,21 @@ def _resolve_videos(mode: str, target: str) -> list[VideoMeta]:
 
 
 def _table_view(records: list[Record]) -> list[Record]:
-    """Compact view for live progress (last 50 rows for readability)."""
-    visible = records[-50:]
+    """Compact view for live progress (latest ``_TABLE_MAX_ROWS`` rows)."""
+    visible = records[-_TABLE_MAX_ROWS:]
     offset = len(records) - len(visible)
     rows: list[Record] = []
     for i, r in enumerate(visible, start=1):
         title = str(r.get("title", ""))
+        status = str(r.get("status", ""))
         rows.append({
             "#": offset + i,
-            "status": r.get("status"),
+            "status": status,
             "lang": r.get("language"),
             "chars": len(str(r.get("transcript", ""))),
             "title": title[:80] + ("…" if len(title) > 80 else ""),
+            # Plain-English reason for non-OK rows (CX, Phase 2c); blank when OK.
+            "why": friendly_transcript_status(status),
         })
     return rows
 
@@ -220,6 +199,10 @@ def render_page() -> None:
 
     common = _render_sidebar()
 
+    st.caption(
+        "📝 **Get transcript** works on a channel, playlist, or single video. "
+        "📥 **Download video** saves one video at a time."
+    )
     tab_transcript, tab_download = st.tabs(["📝  Get transcript", "📥  Download video"])
     with tab_transcript:
         _render_transcript_tab(common)
@@ -248,23 +231,43 @@ def _render_sidebar() -> dict[str, Any]:
             ),
         )
         with st.expander("Advanced (optional)", expanded=False):
-            languages_raw = st.text_input(
-                "Caption language preference",
-                value=DEFAULT_LANGUAGES,
+            # Pick languages by name (priority order); power users can add raw codes.
+            picked_languages = st.multiselect(
+                "Caption languages (most-wanted first)",
+                options=language_options(),
+                default=[option_label(c) for c in DEFAULT_LANGUAGES.split(",") if c.strip()],
                 help=(
-                    "Comma-separated list of language codes — the first available "
-                    "match wins. We always fall back to any auto-generated "
-                    "captions when none of these are available. Examples: "
-                    "`th,en` for Thai-then-English, `en` for English only."
+                    "Choose the caption languages you want, in priority order. "
+                    "We fall back to auto-generated captions when none are available."
                 ),
             )
+            extra_codes = st.text_input(
+                "Other language codes (optional)",
+                value="",
+                placeholder="e.g. nl, sv",
+                help="Comma-separated ISO codes not shown in the list above.",
+            )
+            languages_raw = ",".join(
+                codes_from_labels(picked_languages)
+                + [c.strip() for c in extra_codes.split(",") if c.strip()]
+            ) or DEFAULT_LANGUAGES
             delay_seconds = st.number_input(
                 "Wait between videos (seconds)",
                 min_value=0.0, max_value=10.0,
                 value=DEFAULT_DELAY, step=0.5,
                 help=(
-                    "Pause between transcript requests when scraping a channel "
-                    "or playlist. Increase to 2-3 if YouTube starts blocking us."
+                    "Politeness pause before each transcript request (applied per "
+                    "parallel worker). Increase to 2-3 if YouTube starts blocking us."
+                ),
+            )
+            max_workers = st.number_input(
+                "Parallel fetches",
+                min_value=1, max_value=16,
+                value=DEFAULT_MAX_WORKERS, step=1,
+                help=(
+                    "How many transcripts to fetch at once when scraping a channel "
+                    "or playlist. Higher is faster but more likely to be rate-limited "
+                    "by YouTube. 4 is a safe default."
                 ),
             )
             start_fresh = st.checkbox(
@@ -287,6 +290,7 @@ def _render_sidebar() -> dict[str, Any]:
     return dict(
         languages_raw=languages_raw,
         delay_seconds=float(delay_seconds),
+        max_workers=int(max_workers),
         save_to_disk=bool(save_to_disk),
         start_fresh=bool(start_fresh),
     )
@@ -631,6 +635,7 @@ def _scrape_one_source(
     start_fresh: bool,
     output_dir: Path,
     today: str,
+    max_workers: int | None = None,
     section_label: str | None = None,
 ) -> dict[str, Any]:
     """Run the full partition + fetch + merge cycle for a single source.
@@ -717,11 +722,17 @@ def _scrape_one_source(
             0.0, text=f"Starting transcription for {fetch_count} video(s)…",
         )
         table_holder = st.empty()
+        caption_holder = st.empty()   # "showing last N of M" note for big runs
         started = time.time()
 
-        for idx, video in enumerate(to_fetch, start=1):
-            progress.progress(idx / fetch_count, text=f"[{idx}/{fetch_count}] {video['title'][:80]}")
-            status, language, transcript = fetch_transcript(video["id"], languages)
+        # Fetch in parallel (bounded); results arrive in completion order, which is
+        # safe — records are keyed by id and the summary is order-independent.
+        done = 0
+        for video, status, language, transcript in stream_transcripts(
+            to_fetch, languages, max_workers=max_workers, delay=delay_seconds,
+        ):
+            done += 1
+            progress.progress(done / fetch_count, text=f"[{done}/{fetch_count}] {video['title'][:80]}")
             record = build_record(video, status=status, language=language, transcript=transcript)
             records_this_run.append(record)
             if save_to_disk:
@@ -733,13 +744,15 @@ def _scrape_one_source(
             table_holder.dataframe(
                 _table_view(records_this_run), hide_index=True, use_container_width=True,
             )
-            if delay_seconds > 0 and idx < fetch_count:
-                time.sleep(delay_seconds)
+            if len(records_this_run) > _TABLE_MAX_ROWS:
+                caption_holder.caption(
+                    f"Showing the latest {_TABLE_MAX_ROWS} of {len(records_this_run)} processed."
+                )
 
         elapsed = time.time() - started
         progress.progress(1.0, text=f"Done in {elapsed:.1f}s")
 
-    merged = _merge_records(skipped_records, records_this_run)
+    merged = merge_records(skipped_records, records_this_run)
     return {
         "merged": merged,
         "source_total_videos": total,
@@ -797,6 +810,7 @@ def run_scrape_single(
     handle: str,
     languages_raw: str,
     delay_seconds: float,
+    max_workers: int | None = None,
     save_to_disk: bool,
     start_fresh: bool,
     playlist_title: str | None = None,
@@ -813,7 +827,7 @@ def run_scrape_single(
 
     result = _scrape_one_source(
         mode=mode, target=target, handle=handle,
-        languages=languages, delay_seconds=delay_seconds,
+        languages=languages, delay_seconds=delay_seconds, max_workers=max_workers,
         save_to_disk=save_to_disk, start_fresh=start_fresh,
         output_dir=output_dir, today=today,
     )
@@ -845,6 +859,7 @@ def run_scrape_playlists(
     playlists: list[PlaylistMeta],
     languages_raw: str,
     delay_seconds: float,
+    max_workers: int | None = None,
     save_to_disk: bool,
     start_fresh: bool,
 ) -> None:
@@ -875,7 +890,7 @@ def run_scrape_playlists(
         with st.container(border=True):
             result = _scrape_one_source(
                 mode="playlist", target=pl["url"], handle=pl["id"],
-                languages=languages, delay_seconds=delay_seconds,
+                languages=languages, delay_seconds=delay_seconds, max_workers=max_workers,
                 save_to_disk=save_to_disk, start_fresh=start_fresh,
                 output_dir=output_dir, today=today,
                 section_label=f"[{idx}/{len(playlists)}] {pl['title']}",
@@ -885,7 +900,7 @@ def run_scrape_playlists(
 
     overall.progress(1.0, text=f"Completed {len(playlists)} playlist(s)")
 
-    final_merged = _dedupe_by_id(aggregated)
+    final_merged = dedupe_by_id(aggregated)
     overall_elapsed = time.time() - overall_started
 
     combined_summary = _build_combined_summary(
@@ -962,7 +977,9 @@ def _render_status_banner(result: dict[str, Any], *, prefix: str) -> None:
         return  # _scrape_one_source already showed the "nothing to fetch" success
     if failed == 0:
         st.success(f"✅ Got {successful} of {fetched} transcripts in {elapsed:.1f} seconds.")
-    elif successful == 0:
+        return
+    breakdown = summarize_failures(result["this_run"].get("failures_by_status", {}))
+    if successful == 0:
         st.error(
             f"😕 Couldn't get any transcripts this time ({failed} failed in {elapsed:.1f}s). "
             f"YouTube may be rate-limiting — wait a minute and try again."
@@ -970,8 +987,10 @@ def _render_status_banner(result: dict[str, Any], *, prefix: str) -> None:
     else:
         st.warning(
             f"⚠️ Got {successful} of {fetched} transcripts in {elapsed:.1f}s — "
-            f"{failed} couldn't be fetched (private, no captions, or rate-limited)."
+            f"{failed} couldn't be fetched."
         )
+    if breakdown:
+        st.caption(f"Reasons: {breakdown}")
 
 
 def _render_download_section(

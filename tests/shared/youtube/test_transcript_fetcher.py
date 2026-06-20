@@ -48,13 +48,31 @@ def test_fetch_transcript_no_captions(monkeypatch) -> None:
     assert tf.fetch_transcript("vid", ["en"]) == ("NO_CAPTIONS", "none", "")
 
 
-def test_fetch_transcript_empty_body_is_no_captions(monkeypatch) -> None:
+def test_fetch_transcript_empty_body_is_empty_captions(monkeypatch) -> None:
     monkeypatch.setattr(
         tf, "_extract_info",
         lambda vid: {"subtitles": {"en": [{"ext": "json3", "url": "u"}]}},
     )
     monkeypatch.setattr(tf, "_download", lambda url: json.dumps({"events": []}))
-    assert tf.fetch_transcript("vid", ["en"]) == ("NO_CAPTIONS", "none", "")
+    # A track existed but parsed empty -> EMPTY_CAPTIONS (distinct from NO_CAPTIONS).
+    assert tf.fetch_transcript("vid", ["en"]) == ("EMPTY_CAPTIONS", "none", "")
+
+
+def test_fetch_transcript_unavailable_via_availability(monkeypatch) -> None:
+    monkeypatch.setattr(tf, "_extract_info", lambda vid: {"availability": "private"})
+    assert tf.fetch_transcript("vid", ["en"])[0] == "UNAVAILABLE"
+
+
+def test_fetch_transcript_unavailable_via_age_limit(monkeypatch) -> None:
+    monkeypatch.setattr(tf, "_extract_info", lambda vid: {"age_limit": 18})
+    assert tf.fetch_transcript("vid", ["en"])[0] == "UNAVAILABLE"
+
+
+def test_is_unavailable_helper() -> None:
+    assert tf._is_unavailable({"availability": "subscriber_only"}) is True
+    assert tf._is_unavailable({"age_limit": 21}) is True
+    assert tf._is_unavailable({"availability": "public", "age_limit": 0}) is False
+    assert tf._is_unavailable({"age_limit": "nope"}) is False   # bad value -> False
 
 
 # --------------------------------------------------------------------------- #

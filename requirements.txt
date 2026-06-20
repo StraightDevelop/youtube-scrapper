@@ -1,0 +1,9 @@
+# Core scraper deps. Both channel/playlist listing AND transcript fetch run
+# through yt-dlp — the bare youtube-transcript-api endpoint started returning
+# HTTP 429 in 2026-Q2; yt-dlp's signed timedtext URLs survive YouTube's
+# anti-bot gating. See shared/youtube/transcript_fetcher.py for the rationale.
+yt-dlp>=2024.10.7
+
+# Web UI app `apps/youtube_scraper_web` (Streamlit).
+# Internal/local use only; pulls in pandas + pyarrow + altair transitively.
+streamlit>=1.30,<2.0

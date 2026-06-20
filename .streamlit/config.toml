@@ -1,0 +1,41 @@
+# Project-local Streamlit defaults.
+# These are loaded automatically when `streamlit run` is invoked from the
+# repo root. Everything below is a **local-only** setting — Streamlit itself
+# is open-source (MIT) and runs entirely on your machine.
+
+[browser]
+# Disable the anonymous usage-stats ping to streamlit.io. This is the only
+# outbound network call Streamlit makes by itself. Everything else (channel
+# listing, transcripts) goes directly to youtube.com via our app code.
+gatherUsageStats = false
+
+[server]
+# Bind to loopback only by default — the app will not be reachable from the
+# LAN unless you explicitly override on the command line:
+#     streamlit run apps/youtube_scraper_web/app.py --server.address 0.0.0.0
+address = "127.0.0.1"
+port = 8501
+# Auto-open the browser tab on launch (set to true for headless servers).
+headless = false
+# Disable the "Made with Streamlit" footer / file-watcher reload toasts that
+# can trigger the new-version-check ping.
+fileWatcherType = "auto"
+
+[global]
+# Suppress noisy direct-execution warnings.
+showWarningOnDirectExecution = false
+
+[client]
+# Hide the developer toolbar in production-style local runs.
+toolbarMode = "minimal"
+
+[theme]
+# Glasp-inspired light palette. The accent is YouTube red so the CTA reads
+# unambiguously as a "scrape from YouTube" action; secondary text uses a
+# soft slate. Matches the custom CSS injected by apps/youtube_scraper_web/app.py.
+base = "light"
+primaryColor = "#FF3B30"
+backgroundColor = "#FAFAFA"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#0A0A0A"
+font = "sans serif"

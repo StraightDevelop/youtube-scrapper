@@ -9,6 +9,12 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
+# Test coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
 # Virtual environments
 venv/
 .venv/
@@ -45,3 +51,6 @@ GEMINI.md
 TODOS.md
 CHANGELOG.md
 PROJECT_INFO.md
+
+# loop-engineering working dir (iteration logs + STOP sentinel)
+.loop/

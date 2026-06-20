@@ -1,0 +1,26 @@
+# Project tooling config. Introduced in Phase 1 (test safety net) — the repo had no
+# pyproject before. Holds pytest + coverage configuration so a bare `pytest` run
+# (the loop grader's Python gate, scripts/loop_grade.sh) enforces the done bar.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Put the repo root on sys.path so tests import `from shared...` without hacks.
+pythonpath = ["."]
+# A bare `pytest` (incl. the grader's `pytest -q`) auto-applies the coverage gate.
+addopts = "-q --cov --cov-report=term-missing --cov-fail-under=85"
+
+[tool.coverage.run]
+branch = true
+# Gate scope = the 5 fully-pure modules. transcript_fetcher.py is tested (helpers)
+# but excluded from the gate until Phase 2 mocks its network functions; see
+# specs/phase1-test-safety-net/TECH.md → "Coverage-gate scoping decision".
+include = [
+    "shared/youtube/url_validator.py",
+    "shared/utils/text_cleaner.py",
+    "shared/io/jsonl_writer.py",
+    "shared/io/summary_writer.py",
+    "shared/io/resume_reader.py",
+]
+
+[tool.coverage.report]
+show_missing = true

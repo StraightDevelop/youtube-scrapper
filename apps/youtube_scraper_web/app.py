@@ -35,6 +35,7 @@ if str(_REPO_ROOT) not in sys.path:
 import streamlit as st  # noqa: E402
 
 from shared.io.jsonl_writer import append_jsonl  # noqa: E402
+from shared.io.record_merge import dedupe_by_id, merge_records  # noqa: E402
 from shared.io.resume_reader import collect_channel_history  # noqa: E402
 from shared.io.summary_writer import write_summary  # noqa: E402
 from shared.utils.logger import configure_logging  # noqa: E402
@@ -46,7 +47,12 @@ from shared.youtube.channel_extractor import (  # noqa: E402
     list_channel_videos,
 )
 from shared.youtube.concurrent_fetch import stream_transcripts  # noqa: E402
-from shared.youtube.transcript_fetcher import friendly_transcript_status  # noqa: E402
+from shared.youtube.transcript_fetcher import (  # noqa: E402
+    FAILURE_STATUSES,
+    RETRY_STATUSES,
+    friendly_transcript_status,
+    summarize_failures,
+)
 from shared.youtube.url_validator import (  # noqa: E402
     extract_channel_handle,
     extract_playlist_id,
@@ -68,13 +74,8 @@ logger = logging.getLogger("scraper.web")
 DEFAULT_LANGUAGES = "th,en"
 DEFAULT_DELAY = 1.0
 DEFAULT_MAX_WORKERS = 4   # parallel transcript fetches (Phase 2b); see concurrent_fetch
-FAILURE_STATUSES = ("NO_CAPTIONS", "DISABLED", "NETWORK_ERROR", "OTHER")
-# Statuses worth retrying on a follow-up run. NO_CAPTIONS / DISABLED won't
-# change without the uploader's intervention. NETWORK_ERROR is transient,
-# and OTHER is "unknown failure" by definition — both deserve another shot
-# (especially since v0.5.1 backfills records previously stuck on OTHER from
-# the youtube-transcript-api 429 incident).
-RETRY_STATUSES = {"NETWORK_ERROR", "OTHER"}
+# FAILURE_STATUSES / RETRY_STATUSES imported from shared.youtube.transcript_fetcher
+# (single source of truth — rule 8). RETRY_STATUSES = transient failures only.
 
 Record = dict[str, Any]
 
@@ -142,39 +143,6 @@ def records_to_jsonl_bytes(records: list[Record]) -> bytes:
         return b""
     parts = (json.dumps(r, ensure_ascii=False, separators=(",", ":")) for r in records)
     return ("\n".join(parts) + "\n").encode("utf-8")
-
-
-def _merge_records(prior: list[Record], fresh: list[Record]) -> list[Record]:
-    """Merge prior and freshly-fetched records, with ``fresh`` overriding by ID.
-
-    Order: prior records first (in their original order), then IDs only seen
-    in ``fresh``. Prior records whose ID was re-fetched are replaced in place.
-    """
-    fresh_by_id = {r.get("id"): r for r in fresh if isinstance(r.get("id"), str)}
-    merged: list[Record] = []
-    seen: set[str] = set()
-    for record in prior:
-        rid = record.get("id")
-        if not isinstance(rid, str):
-            continue
-        merged.append(fresh_by_id[rid] if rid in fresh_by_id else record)
-        seen.add(rid)
-    for record in fresh:
-        rid = record.get("id")
-        if isinstance(rid, str) and rid not in seen:
-            merged.append(record)
-            seen.add(rid)
-    return merged
-
-
-def _dedupe_by_id(records: list[Record]) -> list[Record]:
-    """Return ``records`` deduplicated by ID — last occurrence wins."""
-    by_id: dict[str, Record] = {}
-    for record in records:
-        rid = record.get("id")
-        if isinstance(rid, str):
-            by_id[rid] = record
-    return list(by_id.values())
 
 
 def _resolve_videos(mode: str, target: str) -> list[VideoMeta]:
@@ -759,7 +727,7 @@ def _scrape_one_source(
         elapsed = time.time() - started
         progress.progress(1.0, text=f"Done in {elapsed:.1f}s")
 
-    merged = _merge_records(skipped_records, records_this_run)
+    merged = merge_records(skipped_records, records_this_run)
     return {
         "merged": merged,
         "source_total_videos": total,
@@ -907,7 +875,7 @@ def run_scrape_playlists(
 
     overall.progress(1.0, text=f"Completed {len(playlists)} playlist(s)")
 
-    final_merged = _dedupe_by_id(aggregated)
+    final_merged = dedupe_by_id(aggregated)
     overall_elapsed = time.time() - overall_started
 
     combined_summary = _build_combined_summary(
@@ -984,7 +952,9 @@ def _render_status_banner(result: dict[str, Any], *, prefix: str) -> None:
         return  # _scrape_one_source already showed the "nothing to fetch" success
     if failed == 0:
         st.success(f"✅ Got {successful} of {fetched} transcripts in {elapsed:.1f} seconds.")
-    elif successful == 0:
+        return
+    breakdown = summarize_failures(result["this_run"].get("failures_by_status", {}))
+    if successful == 0:
         st.error(
             f"😕 Couldn't get any transcripts this time ({failed} failed in {elapsed:.1f}s). "
             f"YouTube may be rate-limiting — wait a minute and try again."
@@ -992,8 +962,10 @@ def _render_status_banner(result: dict[str, Any], *, prefix: str) -> None:
     else:
         st.warning(
             f"⚠️ Got {successful} of {fetched} transcripts in {elapsed:.1f}s — "
-            f"{failed} couldn't be fetched (private, no captions, or rate-limited)."
+            f"{failed} couldn't be fetched."
         )
+    if breakdown:
+        st.caption(f"Reasons: {breakdown}")
 
 
 def _render_download_section(

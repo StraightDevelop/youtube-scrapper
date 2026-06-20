@@ -21,6 +21,7 @@ include = [
     "shared/io/jsonl_writer.py",
     "shared/io/summary_writer.py",
     "shared/io/resume_reader.py",
+    "shared/io/record_merge.py",
     "shared/youtube/transcript_fetcher.py",
     "shared/youtube/channel_extractor.py",
     "shared/youtube/video_downloader.py",

@@ -33,7 +33,10 @@ from shared.io.summary_writer import write_summary  # noqa: E402
 from shared.utils.logger import configure_logging  # noqa: E402
 from shared.youtube.channel_extractor import VideoMeta, list_channel_videos  # noqa: E402
 from shared.youtube.concurrent_fetch import stream_transcripts  # noqa: E402
-from shared.youtube.transcript_fetcher import friendly_transcript_status  # noqa: E402
+from shared.youtube.transcript_fetcher import (  # noqa: E402
+    FAILURE_STATUSES,
+    friendly_transcript_status,
+)
 from shared.youtube.url_validator import (  # noqa: E402
     extract_channel_handle,
     validate_channel_url,
@@ -42,7 +45,7 @@ from shared.youtube.url_validator import (  # noqa: E402
 DEFAULT_DELAY_SECONDS: float = 1.0
 DEFAULT_LANGUAGES: str = "th,en"
 DEFAULT_OUTPUT_DIR: str = "output"
-FAILURE_STATUSES: tuple[str, ...] = ("NO_CAPTIONS", "DISABLED", "NETWORK_ERROR", "OTHER")
+# FAILURE_STATUSES imported from shared (single source of truth — rule 8).
 
 logger = logging.getLogger("scrape")
 

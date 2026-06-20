@@ -24,6 +24,7 @@ include = [
     "shared/youtube/transcript_fetcher.py",
     "shared/youtube/channel_extractor.py",
     "shared/youtube/video_downloader.py",
+    "shared/youtube/concurrent_fetch.py",
 ]
 
 [tool.coverage.report]

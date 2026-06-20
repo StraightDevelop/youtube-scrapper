@@ -45,7 +45,7 @@ from shared.youtube.channel_extractor import (  # noqa: E402
     list_channel_playlists,
     list_channel_videos,
 )
-from shared.youtube.transcript_fetcher import fetch_transcript  # noqa: E402
+from shared.youtube.concurrent_fetch import stream_transcripts  # noqa: E402
 from shared.youtube.url_validator import (  # noqa: E402
     extract_channel_handle,
     extract_playlist_id,
@@ -66,6 +66,7 @@ logger = logging.getLogger("scraper.web")
 
 DEFAULT_LANGUAGES = "th,en"
 DEFAULT_DELAY = 1.0
+DEFAULT_MAX_WORKERS = 4   # parallel transcript fetches (Phase 2b); see concurrent_fetch
 FAILURE_STATUSES = ("NO_CAPTIONS", "DISABLED", "NETWORK_ERROR", "OTHER")
 # Statuses worth retrying on a follow-up run. NO_CAPTIONS / DISABLED won't
 # change without the uploader's intervention. NETWORK_ERROR is transient,
@@ -263,8 +264,18 @@ def _render_sidebar() -> dict[str, Any]:
                 min_value=0.0, max_value=10.0,
                 value=DEFAULT_DELAY, step=0.5,
                 help=(
-                    "Pause between transcript requests when scraping a channel "
-                    "or playlist. Increase to 2-3 if YouTube starts blocking us."
+                    "Politeness pause before each transcript request (applied per "
+                    "parallel worker). Increase to 2-3 if YouTube starts blocking us."
+                ),
+            )
+            max_workers = st.number_input(
+                "Parallel fetches",
+                min_value=1, max_value=16,
+                value=DEFAULT_MAX_WORKERS, step=1,
+                help=(
+                    "How many transcripts to fetch at once when scraping a channel "
+                    "or playlist. Higher is faster but more likely to be rate-limited "
+                    "by YouTube. 4 is a safe default."
                 ),
             )
             start_fresh = st.checkbox(
@@ -287,6 +298,7 @@ def _render_sidebar() -> dict[str, Any]:
     return dict(
         languages_raw=languages_raw,
         delay_seconds=float(delay_seconds),
+        max_workers=int(max_workers),
         save_to_disk=bool(save_to_disk),
         start_fresh=bool(start_fresh),
     )
@@ -631,6 +643,7 @@ def _scrape_one_source(
     start_fresh: bool,
     output_dir: Path,
     today: str,
+    max_workers: int | None = None,
     section_label: str | None = None,
 ) -> dict[str, Any]:
     """Run the full partition + fetch + merge cycle for a single source.
@@ -719,9 +732,14 @@ def _scrape_one_source(
         table_holder = st.empty()
         started = time.time()
 
-        for idx, video in enumerate(to_fetch, start=1):
-            progress.progress(idx / fetch_count, text=f"[{idx}/{fetch_count}] {video['title'][:80]}")
-            status, language, transcript = fetch_transcript(video["id"], languages)
+        # Fetch in parallel (bounded); results arrive in completion order, which is
+        # safe — records are keyed by id and the summary is order-independent.
+        done = 0
+        for video, status, language, transcript in stream_transcripts(
+            to_fetch, languages, max_workers=max_workers, delay=delay_seconds,
+        ):
+            done += 1
+            progress.progress(done / fetch_count, text=f"[{done}/{fetch_count}] {video['title'][:80]}")
             record = build_record(video, status=status, language=language, transcript=transcript)
             records_this_run.append(record)
             if save_to_disk:
@@ -733,8 +751,6 @@ def _scrape_one_source(
             table_holder.dataframe(
                 _table_view(records_this_run), hide_index=True, use_container_width=True,
             )
-            if delay_seconds > 0 and idx < fetch_count:
-                time.sleep(delay_seconds)
 
         elapsed = time.time() - started
         progress.progress(1.0, text=f"Done in {elapsed:.1f}s")
@@ -797,6 +813,7 @@ def run_scrape_single(
     handle: str,
     languages_raw: str,
     delay_seconds: float,
+    max_workers: int | None = None,
     save_to_disk: bool,
     start_fresh: bool,
     playlist_title: str | None = None,
@@ -813,7 +830,7 @@ def run_scrape_single(
 
     result = _scrape_one_source(
         mode=mode, target=target, handle=handle,
-        languages=languages, delay_seconds=delay_seconds,
+        languages=languages, delay_seconds=delay_seconds, max_workers=max_workers,
         save_to_disk=save_to_disk, start_fresh=start_fresh,
         output_dir=output_dir, today=today,
     )
@@ -845,6 +862,7 @@ def run_scrape_playlists(
     playlists: list[PlaylistMeta],
     languages_raw: str,
     delay_seconds: float,
+    max_workers: int | None = None,
     save_to_disk: bool,
     start_fresh: bool,
 ) -> None:
@@ -875,7 +893,7 @@ def run_scrape_playlists(
         with st.container(border=True):
             result = _scrape_one_source(
                 mode="playlist", target=pl["url"], handle=pl["id"],
-                languages=languages, delay_seconds=delay_seconds,
+                languages=languages, delay_seconds=delay_seconds, max_workers=max_workers,
                 save_to_disk=save_to_disk, start_fresh=start_fresh,
                 output_dir=output_dir, today=today,
                 section_label=f"[{idx}/{len(playlists)}] {pl['title']}",

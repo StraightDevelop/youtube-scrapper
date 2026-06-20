@@ -32,7 +32,7 @@ from shared.io.resume_reader import read_existing_video_ids  # noqa: E402
 from shared.io.summary_writer import write_summary  # noqa: E402
 from shared.utils.logger import configure_logging  # noqa: E402
 from shared.youtube.channel_extractor import VideoMeta, list_channel_videos  # noqa: E402
-from shared.youtube.transcript_fetcher import fetch_transcript  # noqa: E402
+from shared.youtube.concurrent_fetch import stream_transcripts  # noqa: E402
 from shared.youtube.url_validator import (  # noqa: E402
     extract_channel_handle,
     validate_channel_url,
@@ -71,7 +71,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=DEFAULT_DELAY_SECONDS,
         metavar="SECONDS",
-        help=f"Delay between transcript requests in seconds (default: {DEFAULT_DELAY_SECONDS}).",
+        help=(
+            f"Politeness pause before each transcript request in seconds "
+            f"(default: {DEFAULT_DELAY_SECONDS}). Applied per worker."
+        ),
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Number of transcripts to fetch in parallel. Default: the "
+            "YT_SCRAPER_MAX_WORKERS env var, else 4. Keep modest to avoid "
+            "YouTube rate-limiting (HTTP 429)."
+        ),
     )
     parser.add_argument(
         "--languages",
@@ -218,26 +232,28 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     successful = 0
-    skipped = 0
     failures: dict[str, int] = {status: 0 for status in FAILURE_STATUSES}
     started = time.time()
 
-    for index, video in enumerate(videos, start=1):
-        title = video["title"]
-        print(f"[{index}/{total}] {title}")
-        if video["id"] in existing_ids:
-            skipped += 1
-            logger.debug("main: skip_existing id=%s", video["id"])
-            continue
-        status, language, transcript = fetch_transcript(video["id"], languages)
+    # Resume: fetch only what's missing. Concurrency means results arrive in
+    # completion order (not channel order) — safe because the JSONL is keyed by id.
+    to_fetch = [v for v in videos if v["id"] not in existing_ids]
+    skipped = total - len(to_fetch)
+    if skipped:
+        print(f"Skipping {skipped} already-saved video(s) (resume).")
+    fetch_total = len(to_fetch)
+    completed = 0
+    for video, status, language, transcript in stream_transcripts(
+        to_fetch, languages, max_workers=args.workers, delay=args.delay,
+    ):
+        completed += 1
         record = build_record(video, status=status, language=language, transcript=transcript)
         append_jsonl(jsonl_path, record)
         if status == "OK":
             successful += 1
         else:
             failures[status] = failures.get(status, 0) + 1
-        if args.delay > 0 and index < total:
-            time.sleep(args.delay)
+        print(f"[{completed}/{fetch_total}] {status:<13} {video['title']}")
 
     elapsed = time.time() - started
     failed_total = sum(failures.values())
